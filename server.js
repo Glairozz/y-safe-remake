@@ -10,7 +10,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'y-safe-secret-key-2026';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'your-password';
-const DATABASE_PATH = process.env.DATABASE_PATH || './database.sqlite';
+// On Vercel the project directory is read-only; only /tmp is writable.
+const DATABASE_PATH = process.env.DATABASE_PATH || (process.env.VERCEL ? '/tmp/database.sqlite' : './database.sqlite');
 
 const DIST_DIR = path.join(__dirname, 'client', 'dist');
 
@@ -366,6 +367,12 @@ app.get('*', (req, res, next) => {
   res.sendFile(path.join(DIST_DIR, 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`Y-SAFE Web server running on http://localhost:${PORT}`);
-});
+// Start a standalone server only when run directly (e.g. `npm start`).
+// When imported by a serverless platform (Vercel), the app is exported instead.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Y-SAFE Web server running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
