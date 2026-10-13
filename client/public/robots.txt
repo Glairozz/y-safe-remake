@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://y-safe-remake.vercel.app/sitemap.xml

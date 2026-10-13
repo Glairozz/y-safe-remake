@@ -2,6 +2,7 @@ import { FormEvent, useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/AuthContext';
 import { authContent } from '../content/auth';
+import Seo from '../components/Seo';
 
 export default function LoginPage() {
   const { isAuthenticated, login } = useAuth();
@@ -36,6 +37,11 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center px-4 py-10">
+      <Seo
+        title="Sign In - Y-Safe"
+        description="Sign in to Y-Safe with your name and section, or continue as a guest, to access first aid and safety lessons."
+        noindex
+      />
       <div className="w-full max-w-md">
         <Link to="/" className="mb-6 inline-flex items-center gap-2 text-sm font-medium text-ink-secondary hover:text-brand-blue">
           ← Back to home

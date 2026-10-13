@@ -1,6 +1,7 @@
 import { FormEvent, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { adminLogin } from '../services/admin';
+import Seo from '../components/Seo';
 
 export default function AdminLoginPage() {
   const navigate = useNavigate();
@@ -27,6 +28,7 @@ export default function AdminLoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center px-4">
+      <Seo title="Admin Login - Y-Safe" noindex />
       <div className="card w-full max-w-md">
         <h1 className="text-xl font-bold text-ink-primary">Admin Login</h1>
         <p className="mt-1 text-sm text-ink-secondary">Enter the administrator password to continue.</p>

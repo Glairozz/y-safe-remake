@@ -5,6 +5,7 @@ import { useAuth } from '../hooks/AuthContext';
 import { dashboardContent } from '../content/dashboard';
 import { loadCompletedTopics, TUTORIAL_CLOSED_KEY } from '../lib/storage';
 import { fetchLessonProgress, fetchQuizProgress } from '../services/progress';
+import Seo from '../components/Seo';
 
 const topicIcons = [Cross, ShieldAlert, BriefcaseMedical];
 
@@ -43,6 +44,7 @@ export default function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-5xl">
+      <Seo title="Dashboard - Y-Safe" noindex />
       <h1 className="text-2xl font-bold text-ink-primary sm:text-3xl">
         {user?.isGuest
           ? `${dashboardContent.welcomePrefix}!`

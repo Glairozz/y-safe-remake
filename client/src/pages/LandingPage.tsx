@@ -3,12 +3,18 @@ import { ArrowRight, CheckCircle2, ShieldCheck, BookOpen, LifeBuoy } from 'lucid
 import Navbar from '../components/layout/Navbar';
 import Footer from '../components/layout/Footer';
 import { landingContent } from '../content/landing';
+import Seo from '../components/Seo';
 
 const featureIcons = [BookOpen, ShieldCheck, LifeBuoy];
 
 export default function LandingPage() {
   return (
     <div className="min-h-screen">
+      <Seo
+        title="Y-Safe - Essential First Aid and Safety Awareness"
+        description="Y-Safe promotes essential first aid knowledge and safety awareness to help people respond confidently to emergencies."
+        path="/"
+      />
       <Navbar />
       <main>
         <section className="mx-auto flex max-w-6xl flex-col items-center px-4 py-16 text-center sm:py-24">

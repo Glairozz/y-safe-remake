@@ -5,6 +5,7 @@ import {
   fetchAdminStats, fetchAdminUsers, fetchAdminQuizzes, fetchAdminLessons, fetchAdminUser, adminLogout, getAdminToken,
 } from '../services/admin';
 import Modal from '../components/ui/Modal';
+import Seo from '../components/Seo';
 
 type Tab = 'users' | 'quizzes' | 'lessons';
 
@@ -77,6 +78,7 @@ export default function AdminPage() {
 
   return (
     <div className="min-h-screen bg-brand-card-gray">
+      <Seo title="Admin Console - Y-Safe" noindex />
       <header className="sticky top-0 z-30 border-b border-slate-100 bg-white">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
           <h1 className="text-lg font-bold text-brand-header-blue">Y-SAFE Admin</h1>
