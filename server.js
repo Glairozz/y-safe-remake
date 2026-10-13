@@ -7,8 +7,11 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'y-safe-secret-key-2026';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'your-password';
+// Trim environment values to tolerate accidental whitespace/newlines/BOM that
+// can be introduced when a secret is set through a shell pipe.
+const cleanEnv = (value) => (value || '').replace(/^\uFEFF/, '').trim();
+const JWT_SECRET = cleanEnv(process.env.JWT_SECRET) || 'y-safe-secret-key-2026';
+const ADMIN_PASSWORD = cleanEnv(process.env.ADMIN_PASSWORD) || 'your-password';
 // On Vercel the project directory is read-only; only /tmp is writable.
 const DATABASE_PATH = process.env.DATABASE_PATH || (process.env.VERCEL ? '/tmp/database.sqlite' : './database.sqlite');
 
@@ -34,17 +37,31 @@ for (const [from, to] of Object.entries(legacyRedirects)) {
 
 app.use(express.static(DIST_DIR));
 
+// Wait for the database to finish initializing before serving any API request.
+app.use('/api', async (req, res, next) => {
+  await dbReadyPromise;
+  next();
+});
+
 // ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
 
 let dbReady = false;
+let markReady;
+// Resolves once the connection is open and the schema exists (or once the
+// connection has failed). API handlers await this so a serverless cold start
+// never runs a query against a not-yet-initialized database.
+const dbReadyPromise = new Promise((resolve) => {
+  markReady = resolve;
+});
 
 const db = new sqlite3.Database(DATABASE_PATH, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
   if (err) {
     // Do not exit: on a serverless platform a crash is worse than a failed query.
     console.error('Database connection error:', err);
     console.error('Database path:', DATABASE_PATH);
+    markReady();
     return;
   }
   console.log('Connected to SQLite database at:', DATABASE_PATH);
@@ -97,6 +114,7 @@ function initializeDatabase() {
       } else {
         dbReady = true;
       }
+      markReady();
     });
   });
 }
