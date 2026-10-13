@@ -74,12 +74,27 @@ client/
     types/           Shared TypeScript types
 ```
 
-## Deployment
+## Deployment (Vercel)
 
-This repository contains the application source and local development/build
-configuration only. It intentionally excludes platform-specific deployment
-configuration and deployment artifacts. Configure the hosting platform of your
-choice (for example, Vercel) and its environment variables yourself.
+This project is configured for Vercel via `vercel.json`:
+
+- **Build command:** `npm run build` (installs and builds the Vite client)
+- **Output directory:** `client/dist`
+- The Express API in `server.js` is exposed as a serverless function through
+  `api/index.js`. Requests to `/api/*` and `/health` are routed to it, and all
+  other paths fall back to the SPA.
+- On Vercel the project directory is read-only, so SQLite is written to
+  `/tmp/database.sqlite`. That data does **not** persist across function
+  instances — use an external database if you need durable storage.
+
+Set these environment variables in the Vercel project (Settings → Environment
+Variables):
+
+| Variable | Purpose |
+| --- | --- |
+| `JWT_SECRET` | Secret for signing JWTs |
+| `ADMIN_PASSWORD` | Admin console password |
+| `DATABASE_PATH` | Optional; defaults to `/tmp/database.sqlite` on Vercel |
 
 ## Attribution & License
 
