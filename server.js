@@ -1,6 +1,5 @@
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -35,184 +34,281 @@ for (const [from, to] of Object.entries(legacyRedirects)) {
 
 app.use(express.static(DIST_DIR));
 
+// ---------------------------------------------------------------------------
+// Database
+// ---------------------------------------------------------------------------
+
+let dbReady = false;
+
 const db = new sqlite3.Database(DATABASE_PATH, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
   if (err) {
+    // Do not exit: on a serverless platform a crash is worse than a failed query.
     console.error('Database connection error:', err);
     console.error('Database path:', DATABASE_PATH);
-    process.exit(1);
-  } else {
-    console.log('Connected to SQLite database at:', DATABASE_PATH);
-    initializeDatabase();
+    return;
   }
+  console.log('Connected to SQLite database at:', DATABASE_PATH);
+  db.run('PRAGMA foreign_keys = ON');
+  db.run('PRAGMA journal_mode = WAL');
+  initializeDatabase();
 });
 
 function initializeDatabase() {
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    section TEXT,
-    is_guest INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
+  db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      section TEXT,
+      is_guest INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS quiz_progress (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    quiz_type TEXT NOT NULL,
-    quiz_id TEXT NOT NULL,
-    score INTEGER,
-    total_questions INTEGER,
-    completed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  )`);
+    db.run(`CREATE TABLE IF NOT EXISTS quiz_progress (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      quiz_type TEXT NOT NULL,
+      quiz_id TEXT NOT NULL,
+      score INTEGER NOT NULL DEFAULT 0,
+      total_questions INTEGER NOT NULL DEFAULT 0,
+      completed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS lesson_progress (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    lesson_id TEXT NOT NULL,
-    completed INTEGER DEFAULT 0,
-    completed_at DATETIME,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  )`);
+    db.run(`CREATE TABLE IF NOT EXISTS lesson_progress (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      lesson_id TEXT NOT NULL,
+      completed INTEGER NOT NULL DEFAULT 0,
+      completed_at DATETIME,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE (user_id, lesson_id)
+    )`);
+
+    // Indexes for the queries the API and admin console actually run.
+    db.run('CREATE INDEX IF NOT EXISTS idx_users_created_at ON users (created_at DESC)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_users_identity ON users (is_guest, name, section)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_quiz_progress_user ON quiz_progress (user_id)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_quiz_progress_type ON quiz_progress (quiz_type, completed_at DESC)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_lesson_progress_user ON lesson_progress (user_id)');
+
+    db.run('SELECT 1', (err) => {
+      if (err) {
+        console.error('Database initialization error:', err);
+      } else {
+        dbReady = true;
+      }
+    });
+  });
 }
 
-app.post('/api/register', (req, res) => {
-  const { name, section, isGuest } = req.body;
-  
-  // For guests, name is optional
-  if (!isGuest && (!name || name.trim() === '')) {
+// Promise wrappers around the callback-based driver.
+const run = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) reject(err);
+      else resolve(this);
+    });
+  });
+
+const get = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+
+const all = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function toClientUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    section: user.section || undefined,
+    isGuest: !!user.is_guest,
+  };
+}
+
+function signUserToken(user) {
+  return jwt.sign(
+    { userId: user.id, name: user.name, isGuest: !!user.is_guest },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+}
+
+// Find an existing user (so repeat logins do not create duplicate rows) or
+// create one. Guests are persisted too, with is_guest = 1, so their activity
+// shows up correctly in the admin console.
+async function findOrCreateUser({ name, section, isGuest }) {
+  const guestFlag = isGuest ? 1 : 0;
+  const cleanName = (name && String(name).trim()) || (guestFlag ? 'Guest' : '');
+  const cleanSection = section && String(section).trim() ? String(section).trim() : null;
+
+  const existing = await get(
+    `SELECT * FROM users
+     WHERE is_guest = ? AND name = ? AND IFNULL(section, '') = IFNULL(?, '')
+     LIMIT 1`,
+    [guestFlag, cleanName, cleanSection]
+  );
+  if (existing) return existing;
+
+  const result = await run(
+    'INSERT INTO users (name, section, is_guest) VALUES (?, ?, ?)',
+    [cleanName, cleanSection, guestFlag]
+  );
+  return {
+    id: result.lastID,
+    name: cleanName,
+    section: cleanSection,
+    is_guest: guestFlag,
+    created_at: new Date().toISOString(),
+  };
+}
+
+function requireAuth(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+function handleError(res, context, err) {
+  console.error(`${context} error:`, err);
+  res.status(500).json({ error: 'Database error: ' + err.message });
+}
+
+// ---------------------------------------------------------------------------
+// Auth API
+// ---------------------------------------------------------------------------
+
+async function registerOrLogin(req, res) {
+  const { name, section, isGuest } = req.body || {};
+
+  if (!isGuest && (!name || !String(name).trim())) {
     return res.status(400).json({ error: 'Name is required for registered users' });
   }
 
-  // For guests, don't save to database
-  if (isGuest) {
-    const guestName = name && name.trim() !== '' ? name.trim() : 'Guest';
-    const token = jwt.sign(
-      { userId: null, name: guestName, isGuest: true },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    return res.json({
-      token,
-      user: { id: null, name: guestName, section, isGuest: true }
-    });
+  try {
+    const user = await findOrCreateUser({ name, section, isGuest });
+    res.json({ token: signUserToken(user), user: toClientUser(user) });
+  } catch (err) {
+    handleError(res, 'Register/login', err);
   }
+}
 
-  // For registered users, save to database
-  const stmt = db.prepare('INSERT INTO users (name, section, is_guest) VALUES (?, ?, ?)');
-  stmt.run(name, section || null, 0, function(err) {
-    if (err) {
-      console.error('Register database error:', err);
-      return res.status(500).json({ error: 'Database error: ' + err.message });
+app.post('/api/register', registerOrLogin);
+app.post('/api/login', registerOrLogin);
+
+app.get('/api/user', requireAuth, async (req, res) => {
+  try {
+    if (req.user.userId != null) {
+      const user = await get('SELECT * FROM users WHERE id = ?', [req.user.userId]);
+      if (user) return res.json({ user: toClientUser(user) });
     }
-
-    const token = jwt.sign(
-      { userId: this.lastID, name, isGuest: false },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    res.json({
-      token,
-      user: { id: this.lastID, name, section, isGuest: false }
-    });
-  });
-});
-
-app.post('/api/login', (req, res) => {
-  const { name, section, isGuest } = req.body;
-  
-  // For guests, name is optional
-  if (!isGuest && (!name || name.trim() === '')) {
-    return res.status(400).json({ error: 'Name is required for registered users' });
+    res.json({ user: { id: req.user.userId ?? null, name: req.user.name, isGuest: !!req.user.isGuest } });
+  } catch (err) {
+    handleError(res, 'Get user', err);
   }
+});
 
-  // For guests, don't save to database
-  if (isGuest) {
-    const guestName = name && name.trim() !== '' ? name.trim() : 'Guest';
-    const token = jwt.sign(
-      { userId: null, name: guestName, isGuest: true },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
+// ---------------------------------------------------------------------------
+// Progress API (persisted per user)
+// ---------------------------------------------------------------------------
 
-    return res.json({
-      token,
-      user: { id: null, name: guestName, section, isGuest: true }
-    });
+app.post('/api/quiz-progress', requireAuth, async (req, res) => {
+  const { quizType, quizId, score, totalQuestions } = req.body || {};
+  if (!quizType || !quizId) {
+    return res.status(400).json({ error: 'quizType and quizId are required' });
   }
-
-  // For registered users, save to database
-  const stmt = db.prepare('INSERT INTO users (name, section, is_guest) VALUES (?, ?, ?)');
-  stmt.run(name, section || null, 0, function(err) {
-    if (err) {
-      console.error('Login database error:', err);
-      return res.status(500).json({ error: 'Database error: ' + err.message });
-    }
-
-    const token = jwt.sign(
-      { userId: this.lastID, name, isGuest: false },
-      JWT_SECRET,
-      { expiresIn: '7d' }
+  try {
+    await run(
+      `INSERT INTO quiz_progress (user_id, quiz_type, quiz_id, score, total_questions)
+       VALUES (?, ?, ?, ?, ?)`,
+      [req.user.userId, quizType, quizId, Number(score) || 0, Number(totalQuestions) || 0]
     );
-
-    res.json({
-      token,
-      user: { id: this.lastID, name, section, isGuest: false }
-    });
-  });
+    res.json({ success: true });
+  } catch (err) {
+    handleError(res, 'Save quiz progress', err);
+  }
 });
 
-app.get('/api/user', (req, res) => {
-  // No authentication required - return guest user info
-  res.json({ 
-    user: { 
-      name: 'Guest', 
-      isGuest: true 
-    } 
-  });
+app.get('/api/quiz-progress/:quizType', requireAuth, async (req, res) => {
+  try {
+    const progress = await all(
+      `SELECT id, quiz_type, quiz_id, score, total_questions, completed_at
+       FROM quiz_progress
+       WHERE user_id = ? AND quiz_type = ?
+       ORDER BY completed_at DESC`,
+      [req.user.userId, req.params.quizType]
+    );
+    res.json({ progress });
+  } catch (err) {
+    handleError(res, 'Get quiz progress', err);
+  }
 });
 
-app.post('/api/quiz-progress', (req, res) => {
-  // No authentication required - direct access
-  const { quizType, quizId, score, totalQuestions } = req.body;
-  
-  // Always return success but don't record to database
-  res.json({ 
-    success: true, 
-    message: 'Progress received (not recorded in public mode)' 
-  });
+app.post('/api/lesson-progress', requireAuth, async (req, res) => {
+  const { lessonId, completed = true } = req.body || {};
+  if (!lessonId) {
+    return res.status(400).json({ error: 'lessonId is required' });
+  }
+  try {
+    await run(
+      `INSERT INTO lesson_progress (user_id, lesson_id, completed, completed_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT (user_id, lesson_id)
+       DO UPDATE SET completed = excluded.completed, completed_at = excluded.completed_at`,
+      [req.user.userId, lessonId, completed ? 1 : 0]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    handleError(res, 'Save lesson progress', err);
+  }
 });
 
-app.get('/api/quiz-progress/:quizType', (req, res) => {
-  // No authentication required - return empty progress for public mode
-  res.json({ progress: [] });
-});
-
-app.post('/api/lesson-progress', (req, res) => {
-  // No authentication required - direct access
-  const { lessonId } = req.body;
-  
-  // Always return success but don't record to database
-  res.json({ 
-    success: true, 
-    message: 'Progress received (not recorded in public mode)' 
-  });
-});
-
-app.get('/api/lesson-progress', (req, res) => {
-  // No authentication required - return empty progress for public mode
-  res.json({ progress: [] });
+app.get('/api/lesson-progress', requireAuth, async (req, res) => {
+  try {
+    const progress = await all(
+      `SELECT id, lesson_id, completed, completed_at
+       FROM lesson_progress
+       WHERE user_id = ?
+       ORDER BY completed_at DESC`,
+      [req.user.userId]
+    );
+    res.json({ progress });
+  } catch (err) {
+    handleError(res, 'Get lesson progress', err);
+  }
 });
 
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.status(200).json({ status: 'ok', database: dbReady ? 'ready' : 'connecting', timestamp: new Date().toISOString() });
 });
+
+// ---------------------------------------------------------------------------
+// Admin API
+// ---------------------------------------------------------------------------
 
 function adminAuth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
-  
+
   if (!token) {
     return res.status(401).json({ error: 'No token provided' });
   }
@@ -224,141 +320,94 @@ function adminAuth(req, res, next) {
     }
     req.admin = decoded;
     next();
-  } catch (err) {
+  } catch {
     res.status(401).json({ error: 'Invalid token' });
   }
 }
 
 app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body;
-  
+  const { password } = req.body || {};
+
   if (password === ADMIN_PASSWORD) {
-    const token = jwt.sign(
-      { isAdmin: true, name: 'Admin' },
-      JWT_SECRET,
-      { expiresIn: '1d' }
-    );
+    const token = jwt.sign({ isAdmin: true, name: 'Admin' }, JWT_SECRET, { expiresIn: '1d' });
     res.json({ token, message: 'Login successful' });
   } else {
     res.status(401).json({ error: 'Invalid password' });
   }
 });
 
-app.get('/api/admin/users', adminAuth, (req, res) => {
-  db.all(
-    'SELECT * FROM users ORDER BY created_at DESC',
-    (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
-      res.json({ users: rows });
-    }
-  );
+app.get('/api/admin/users', adminAuth, async (req, res) => {
+  try {
+    const users = await all('SELECT * FROM users ORDER BY created_at DESC');
+    res.json({ users });
+  } catch (err) {
+    handleError(res, 'Admin users', err);
+  }
 });
 
-app.get('/api/admin/quizzes', adminAuth, (req, res) => {
-  db.all(
-    `SELECT qp.*, u.name as user_name, u.section 
-     FROM quiz_progress qp 
-     JOIN users u ON qp.user_id = u.id 
-     ORDER BY qp.completed_at DESC`,
-    (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
-      res.json({ quizzes: rows });
-    }
-  );
+app.get('/api/admin/quizzes', adminAuth, async (req, res) => {
+  try {
+    const quizzes = await all(
+      `SELECT qp.*, COALESCE(u.name, 'Guest') AS user_name, u.section
+       FROM quiz_progress qp
+       LEFT JOIN users u ON qp.user_id = u.id
+       ORDER BY qp.completed_at DESC`
+    );
+    res.json({ quizzes });
+  } catch (err) {
+    handleError(res, 'Admin quizzes', err);
+  }
 });
 
-app.get('/api/admin/lessons', adminAuth, (req, res) => {
-  db.all(
-    `SELECT lp.*, u.name as user_name, u.section 
-     FROM lesson_progress lp 
-     JOIN users u ON lp.user_id = u.id 
-     ORDER BY lp.completed_at DESC`,
-    (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
-      res.json({ lessons: rows });
-    }
-  );
+app.get('/api/admin/lessons', adminAuth, async (req, res) => {
+  try {
+    const lessons = await all(
+      `SELECT lp.*, COALESCE(u.name, 'Guest') AS user_name, u.section
+       FROM lesson_progress lp
+       LEFT JOIN users u ON lp.user_id = u.id
+       ORDER BY lp.completed_at DESC`
+    );
+    res.json({ lessons });
+  } catch (err) {
+    handleError(res, 'Admin lessons', err);
+  }
 });
 
-app.get('/api/admin/user/:id', adminAuth, (req, res) => {
+app.get('/api/admin/user/:id', adminAuth, async (req, res) => {
   const userId = req.params.id;
-  
-  db.get('SELECT * FROM users WHERE id = ?', [userId], (err, user) => {
-    if (err) {
-      return res.status(500).json({ error: 'Database error' });
-    }
-    
+  try {
+    const user = await get('SELECT * FROM users WHERE id = ?', [userId]);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-
-    db.all(
-      'SELECT * FROM quiz_progress WHERE user_id = ? ORDER BY completed_at DESC',
-      [userId],
-      (err, quizzes) => {
-        if (err) {
-          return res.status(500).json({ error: 'Database error' });
-        }
-
-        db.all(
-          'SELECT * FROM lesson_progress WHERE user_id = ? ORDER BY completed_at DESC',
-          [userId],
-          (err, lessons) => {
-            if (err) {
-              return res.status(500).json({ error: 'Database error' });
-            }
-
-            res.json({
-              user,
-              quizzes,
-              lessons
-            });
-          }
-        );
-      }
-    );
-  });
+    const [quizzes, lessons] = await Promise.all([
+      all('SELECT * FROM quiz_progress WHERE user_id = ? ORDER BY completed_at DESC', [userId]),
+      all('SELECT * FROM lesson_progress WHERE user_id = ? ORDER BY completed_at DESC', [userId]),
+    ]);
+    res.json({ user, quizzes, lessons });
+  } catch (err) {
+    handleError(res, 'Admin user detail', err);
+  }
 });
 
-app.get('/api/admin/stats', adminAuth, (req, res) => {
-  db.get('SELECT COUNT(*) as count FROM users', (err, usersResult) => {
-    if (err) {
-      return res.status(500).json({ error: 'Database error' });
-    }
+app.get('/api/admin/stats', adminAuth, async (req, res) => {
+  try {
+    const [usersResult, quizzesResult, lessonsResult, scoreResult] = await Promise.all([
+      get('SELECT COUNT(*) AS count FROM users'),
+      get('SELECT COUNT(*) AS count FROM quiz_progress'),
+      get('SELECT COUNT(*) AS count FROM lesson_progress'),
+      get('SELECT AVG(CAST(score AS FLOAT) / NULLIF(total_questions, 0)) * 100 AS avg FROM quiz_progress'),
+    ]);
 
-    db.get('SELECT COUNT(*) as count FROM quiz_progress', (err, quizzesResult) => {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
-
-      db.get('SELECT COUNT(*) as count FROM lesson_progress', (err, lessonsResult) => {
-        if (err) {
-          return res.status(500).json({ error: 'Database error' });
-        }
-
-        db.get('SELECT AVG(CAST(score AS FLOAT) / CAST(total_questions AS FLOAT)) * 100 as avg FROM quiz_progress', (err, scoreResult) => {
-          if (err) {
-            return res.status(500).json({ error: 'Database error' });
-          }
-
-          const avgScore = scoreResult.avg ? Math.round(scoreResult.avg) : 0;
-
-          res.json({
-            totalUsers: usersResult.count,
-            totalQuizzes: quizzesResult.count,
-            totalLessons: lessonsResult.count,
-            averageScore: avgScore
-          });
-        });
-      });
+    res.json({
+      totalUsers: usersResult.count,
+      totalQuizzes: quizzesResult.count,
+      totalLessons: lessonsResult.count,
+      averageScore: scoreResult.avg ? Math.round(scoreResult.avg) : 0,
     });
-  });
+  } catch (err) {
+    handleError(res, 'Admin stats', err);
+  }
 });
 
 // SPA fallback: serve index.html for any non-API GET route

@@ -44,6 +44,21 @@ real secrets.
 | `ADMIN_PASSWORD` | Admin console password |
 | `DATABASE_PATH` | SQLite database location |
 
+## Database
+
+SQLite (via the `sqlite3` driver) stores the application data. The schema is
+created automatically on first run:
+
+- `users` — `id`, `name`, `section`, `is_guest`, `created_at`
+- `quiz_progress` — `user_id`, `quiz_type`, `quiz_id`, `score`, `total_questions`, `completed_at`
+- `lesson_progress` — `user_id`, `lesson_id`, `completed`, `completed_at` (unique per user + lesson)
+
+Both registered users and guests are persisted. Repeat logins with the same
+name/section reuse the existing row instead of creating duplicate users, and
+quiz and lesson results are written to the database so the dashboard and the
+admin console display real activity. Indexes are defined for the queries the
+API runs most often.
+
 ## Routes
 
 | Route | Behavior |

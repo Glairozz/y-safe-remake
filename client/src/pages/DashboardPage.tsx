@@ -16,8 +16,8 @@ export default function DashboardPage() {
   const [avgScore, setAvgScore] = useState(0);
 
   useEffect(() => {
-    const local = Object.keys(loadCompletedTopics()).filter((k) => loadCompletedTopics()[k]).length;
-    setLessonsDone(local);
+    const completed = loadCompletedTopics();
+    setLessonsDone(Object.values(completed).filter(Boolean).length);
   }, []);
 
   useEffect(() => {

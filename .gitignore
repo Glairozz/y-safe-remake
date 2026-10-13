@@ -18,6 +18,9 @@ client/build/
 *.sqlite3
 *.db
 database.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
 
 # Hosting platform metadata
 .vercel/
