@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-brand-card-gray text-ink-primary font-sans antialiased;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+  .btn-primary {
+    @apply btn bg-brand-blue text-white hover:bg-brand-header-blue focus:ring-brand-blue;
+  }
+  .btn-secondary {
+    @apply btn bg-white text-brand-header-blue border border-brand-soft-blue hover:bg-brand-soft-blue/40 focus:ring-brand-blue;
+  }
+  .btn-success {
+    @apply btn bg-brand-green text-white hover:bg-green-700 focus:ring-brand-green;
+  }
+  .card {
+    @apply rounded-card bg-white p-6 shadow-sm border border-slate-100;
+  }
+  .input {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-ink-primary placeholder-slate-400 focus:border-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-soft-blue;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-ink-primary;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
